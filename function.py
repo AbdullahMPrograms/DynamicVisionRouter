@@ -82,6 +82,14 @@ class Pipe:
             ),
             description="The prompt to use when asking Gemini to describe an image",
         )
+        SHOW_GEMINI_DESCRIPTIONS: bool = Field(
+            default=os.getenv("SHOW_GEMINI_DESCRIPTIONS", "false").lower() == "true",
+            description="Show Gemini's raw image descriptions in a collapsible section",
+        )
+        GEMINI_SECTION_TITLE: str = Field(
+            default=os.getenv("GEMINI_SECTION_TITLE", "🖼️ Gemini Image Descriptions"),
+            description="Title for the collapsible Gemini descriptions section",
+        )
 
     def __init__(self):
         logging.basicConfig(level=logging.INFO)
@@ -91,6 +99,7 @@ class Pipe:
         self.request_id = None
         self.image_cache = {}
         self.model_list_cache = {"models": [], "timestamp": 0}
+        self.current_gemini_descriptions = []
 
     def clean_expired_cache(self):
         """Remove expired entries from cache"""
@@ -222,8 +231,14 @@ class Pipe:
                 image_key = image_url.split(",", 1)[1] if "," in image_url else ""
 
             if image_key in self.image_cache:
+                description = self.image_cache[image_key].description
                 logging.info(f"Using cached image description for {image_key[:30]}...")
-                return self.image_cache[image_key].description
+                # Store the description for display if enabled
+                if self.valves.SHOW_GEMINI_DESCRIPTIONS:
+                    self.current_gemini_descriptions.append(
+                        {"description": description, "cached": True}
+                    )
+                return description
 
             if __event_emitter__:
                 processing_message = {
@@ -253,6 +268,12 @@ class Pipe:
 
             self.image_cache[image_key] = CacheEntry(description)
 
+            # Store the description for display if enabled
+            if self.valves.SHOW_GEMINI_DESCRIPTIONS:
+                self.current_gemini_descriptions.append(
+                    {"description": description, "cached": False}
+                )
+
             if len(self.image_cache) > 100:
                 oldest_key = min(
                     self.image_cache.keys(), key=lambda k: self.image_cache[k].timestamp
@@ -262,8 +283,16 @@ class Pipe:
             return description
 
         except Exception as e:
+            error_msg = f"[Error processing image: {str(e)}]"
             logging.error(f"Error processing image with Gemini: {str(e)}")
-            return f"[Error processing image: {str(e)}]"
+
+            # Store error info if enabled
+            if self.valves.SHOW_GEMINI_DESCRIPTIONS:
+                self.current_gemini_descriptions.append(
+                    {"description": error_msg, "error": True}
+                )
+
+            return error_msg
         finally:
             if __event_emitter__ and processing_message:
                 # Clear the processing message by sending a completion update
@@ -284,6 +313,8 @@ class Pipe:
     ) -> List[Dict]:
         """Process messages, replacing images with their descriptions."""
         processed_messages = []
+        # Clear previous descriptions
+        self.current_gemini_descriptions = []
 
         for message in messages:
             images, text = self.extract_images_and_text(message)
@@ -326,6 +357,29 @@ class Pipe:
                 processed_messages.append(message)
 
         return processed_messages
+
+    def format_gemini_descriptions(self):
+        """Format Gemini descriptions as a collapsible HTML section"""
+        if not self.current_gemini_descriptions:
+            return ""
+
+        # Opening details tag with configurable summary
+        result = f"<details>\n<summary>{self.valves.GEMINI_SECTION_TITLE}</summary>\n\n"
+
+        # Content inside the details tag
+        for idx, desc in enumerate(self.current_gemini_descriptions, 1):
+            cached_label = " (cached)" if desc.get("cached") else ""
+            error_prefix = "ERROR: " if desc.get("error") else ""
+
+            result += f"**Image {idx}{cached_label}**\n\n"
+            result += f"{error_prefix}{desc['description']}\n\n"
+
+        # Add separator inside the details tag before closing - using Markdown's horizontal rule
+        result += "---\n\n"
+
+        # Close the details tag
+        result += "</details>\n\n"
+        return result
 
     async def pipe(
         self, body: Dict, __event_emitter__=None
@@ -388,10 +442,18 @@ class Pipe:
             }
 
             if payload["stream"]:
+                gemini_desc = ""
+                if (
+                    self.valves.SHOW_GEMINI_DESCRIPTIONS
+                    and self.current_gemini_descriptions
+                ):
+                    gemini_desc = self.format_gemini_descriptions()
+
                 return self._stream_response(
                     url=self.valves.OPENAI_API_URL,
                     headers=headers,
                     payload=payload,
+                    gemini_descriptions=gemini_desc,
                     __event_emitter__=__event_emitter__,
                 )
 
@@ -418,6 +480,16 @@ class Pipe:
                     result = await response.json()
                     if "choices" in result and len(result["choices"]) > 0:
                         response_text = result["choices"][0]["message"]["content"]
+
+                        # If enabled, prepend Gemini descriptions to the response
+                        if (
+                            self.valves.SHOW_GEMINI_DESCRIPTIONS
+                            and self.current_gemini_descriptions
+                        ):
+                            response_text = (
+                                self.format_gemini_descriptions() + response_text
+                            )
+
                         if __event_emitter__:
                             await __event_emitter__(
                                 {
@@ -440,9 +512,18 @@ class Pipe:
             return {"content": error_msg, "format": "text"}
 
     async def _stream_response(
-        self, url: str, headers: dict, payload: dict, __event_emitter__=None
+        self,
+        url: str,
+        headers: dict,
+        payload: dict,
+        gemini_descriptions: str = "",
+        __event_emitter__=None,
     ) -> AsyncIterator[str]:
         try:
+            # First yield the Gemini descriptions if we have them
+            if gemini_descriptions:
+                yield gemini_descriptions
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=headers, json=payload) as response:
                     if response.status != 200:
