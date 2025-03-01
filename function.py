@@ -68,12 +68,19 @@ class Pipe:
             le=2.0,
         )
         OPENAI_MODELS: str = Field(
-            default=os.getenv("OPENAI_MODELS", "all"),
+            default=os.getenv("OPENAI_MODELS", "Vision Routed LLM"),
             description="Names of the OpenAI-compatible models to use (comma-separated) or 'all' to use all available models",
         )
         GEMINI_MODEL_NAME: str = Field(
             default=os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash-lite"),
             description="Name of the Google Gemini model to use for image processing",
+        )
+        IMAGE_DESCRIPTION_PROMPT: str = Field(
+            default=os.getenv(
+                "IMAGE_DESCRIPTION_PROMPT",
+                "Give a clear and detailed description of this image.",
+            ),
+            description="The prompt to use when asking Gemini to describe an image",
         )
 
     def __init__(self):
@@ -239,7 +246,8 @@ class Pipe:
             else:
                 image_part = {"image_url": image_url}
 
-            prompt = "Give a clear and detailed description of this image."
+            # Use the configurable prompt from valves instead of hard-coded text
+            prompt = self.valves.IMAGE_DESCRIPTION_PROMPT
             response = model.generate_content([prompt, image_part])
             description = response.text
 
