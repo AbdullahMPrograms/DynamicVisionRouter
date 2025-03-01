@@ -14,6 +14,7 @@ from typing import (
     Optional,
     AsyncIterator,
     Tuple,
+    Any,
 )
 from pydantic import BaseModel, Field
 from open_webui.utils.misc import pop_system_message
@@ -33,10 +34,11 @@ class ModelConfig(BaseModel):
 
 class Pipe:
     SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"]
-    MAX_IMAGE_SIZE = 5 * 1024 * 1024
-    TOTAL_MAX_IMAGE_SIZE = 100 * 1024 * 1024
+    MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB per image
+    TOTAL_MAX_IMAGE_SIZE = 100 * 1024 * 1024  # 100MB total
     REQUEST_TIMEOUT = (3.05, 60)
-    CACHE_EXPIRATION = 30 * 60
+    CACHE_EXPIRATION = 30 * 60  # 30 minutes in seconds
+    MODEL_LIST_CACHE_EXPIRATION = 10 * 60  # 10 minutes in seconds
 
     class Valves(BaseModel):
         OPENAI_API_URL: str = Field(
@@ -51,15 +53,27 @@ class Pipe:
             default=os.getenv("GOOGLE_API_KEY", ""),
             description="Your Google API key for image processing",
         )
-        MODEL_NAME: str = Field(
-            default=os.getenv("MODEL_NAME", ""),
-            description="The model name to use for completion",
-        )
         CONTEXT_LENGTH: int = Field(
-            default=int(
-                os.getenv("CONTEXT_LENGTH", "4096")
-            ),  # Changed to string default
-            description="Maximum context length for the model",
+            default=int(os.getenv("CONTEXT_LENGTH", 4096)),
+            description="Maximum context window size for the model",
+        )
+        NUM_PREDICT: int = Field(
+            default=int(os.getenv("NUM_PREDICT", 2048)),
+            description="Maximum number of tokens to generate (max_tokens/num_predict)",
+        )
+        TEMPERATURE: float = Field(
+            default=float(os.getenv("TEMPERATURE", 0.6)),
+            description="Default temperature parameter for sampling",
+            ge=0.0,
+            le=2.0,
+        )
+        OPENAI_MODELS: str = Field(
+            default=os.getenv("OPENAI_MODELS", "all"),
+            description="Names of the OpenAI-compatible models to use (comma-separated) or 'all' to use all available models",
+        )
+        GEMINI_MODEL_NAME: str = Field(
+            default=os.getenv("GEMINI_MODEL_NAME", "gemini-2.0-flash-lite"),
+            description="Name of the Google Gemini model to use for image processing",
         )
 
     def __init__(self):
@@ -69,31 +83,7 @@ class Pipe:
         self.valves = self.Valves()
         self.request_id = None
         self.image_cache = {}
-
-    def _setup_api_url(self):
-        """Configure the API URL based on the base URL"""
-        base_url = self.valves.API_BASE.rstrip("/")
-        self.API_URL = f"{base_url}/chat/completions"
-
-    def _setup_models(self):
-        """Set up model configurations from valves"""
-        self.models = {}
-        for config in self.valves.MODEL_CONFIGS:
-            model_config = ModelConfig(**config)
-            self.models[model_config.name] = model_config.context_length
-
-    def get_available_models(self) -> List[dict]:
-        return [
-            {
-                "id": f"{self.id}/{self.valves.MODEL_NAME}",
-                "name": self.valves.MODEL_NAME,
-                "context_length": self.valves.CONTEXT_LENGTH,
-                "supports_vision": True,
-            }
-        ]
-
-    def pipes(self) -> List[dict]:
-        return self.get_available_models()
+        self.model_list_cache = {"models": [], "timestamp": 0}
 
     def clean_expired_cache(self):
         """Remove expired entries from cache"""
@@ -105,6 +95,91 @@ class Pipe:
         ]
         for key in expired_keys:
             del self.image_cache[key]
+
+    def _fetch_openai_models(self) -> List[Dict[str, Any]]:
+        """Fetch available models from the OpenAI API"""
+        current_time = time.time()
+
+        # Return cached models if still valid
+        if (
+            current_time - self.model_list_cache["timestamp"]
+            < self.MODEL_LIST_CACHE_EXPIRATION
+            and self.model_list_cache["models"]
+        ):
+            return self.model_list_cache["models"]
+
+        try:
+            # Determine the base URL and build the models endpoint URL
+            api_base = self.valves.OPENAI_API_URL
+            if "/v1/chat/completions" in api_base:
+                api_base = api_base.replace("/v1/chat/completions", "")
+            elif "/chat/completions" in api_base:
+                api_base = api_base.replace("/chat/completions", "")
+
+            models_url = f"{api_base.rstrip('/')}/v1/models"
+
+            headers = {
+                "Authorization": f"Bearer {self.valves.OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            }
+
+            response = requests.get(
+                models_url, headers=headers, timeout=self.REQUEST_TIMEOUT
+            )
+            if response.status_code == 200:
+                data = response.json()
+                models = data.get("data", [])
+
+                # Update cache
+                self.model_list_cache = {"models": models, "timestamp": current_time}
+
+                return models
+            else:
+                logging.error(
+                    f"Failed to fetch models: HTTP {response.status_code}: {response.text}"
+                )
+                # Return empty list or cached models if available
+                return self.model_list_cache["models"]
+        except Exception as e:
+            logging.error(f"Error fetching OpenAI models: {str(e)}")
+            return self.model_list_cache["models"]
+
+    def get_available_models(self) -> List[dict]:
+        """Get available models based on configuration"""
+        models_to_use = []
+
+        if self.valves.OPENAI_MODELS.lower() == "all":
+            # Fetch and return all models from the API
+            all_models = self._fetch_openai_models()
+            for model in all_models:
+                models_to_use.append(
+                    {
+                        "id": f"{self.id}/{model.get('id')}",
+                        "name": model.get("id"),
+                        "context_length": self.valves.CONTEXT_LENGTH,
+                        "supports_vision": True,  # Assuming all models support vision - may need refinement
+                    }
+                )
+        else:
+            # Return specified models (comma-separated)
+            model_names = [
+                name.strip() for name in self.valves.OPENAI_MODELS.split(",")
+            ]
+            for model_name in model_names:
+                if model_name:
+                    models_to_use.append(
+                        {
+                            "id": f"{self.id}/{model_name}",
+                            "name": model_name,
+                            "context_length": self.valves.CONTEXT_LENGTH,
+                            "supports_vision": True,
+                        }
+                    )
+
+        return models_to_use
+
+    def pipes(self) -> List[dict]:
+        return self.get_available_models()
 
     def extract_images_and_text(self, message: Dict) -> Tuple[List[Dict], str]:
         """Extract images and text from a message."""
@@ -127,6 +202,7 @@ class Pipe:
         self, image_data: Dict, __event_emitter__=None
     ) -> str:
         """Process a single image with Gemini and return its description."""
+        processing_message = None
         try:
             if not self.valves.GOOGLE_API_KEY:
                 raise ValueError("GOOGLE_API_KEY is required for image processing")
@@ -143,18 +219,17 @@ class Pipe:
                 return self.image_cache[image_key].description
 
             if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": "Processing new image...",
-                            "done": False,
-                        },
-                    }
-                )
+                processing_message = {
+                    "type": "status",
+                    "data": {
+                        "description": "Processing new image...",
+                        "done": False,
+                    },
+                }
+                await __event_emitter__(processing_message)
 
             genai.configure(api_key=self.valves.GOOGLE_API_KEY)
-            model = genai.GenerativeModel("gemini-2.0-flash-exp")
+            model = genai.GenerativeModel(self.valves.GEMINI_MODEL_NAME)
 
             if image_url.startswith("data:image"):
                 image_data = image_url.split(",", 1)[1] if "," in image_url else ""
@@ -181,6 +256,20 @@ class Pipe:
         except Exception as e:
             logging.error(f"Error processing image with Gemini: {str(e)}")
             return f"[Error processing image: {str(e)}]"
+        finally:
+            if __event_emitter__ and processing_message:
+                # Clear the processing message by sending a completion update
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            # Empty description clears the text
+                            "description": "",
+                            # Done flag removes the status indicator
+                            "done": True,
+                        },
+                    }
+                )
 
     async def process_messages(
         self, messages: List[Dict], __event_emitter__=None
@@ -225,16 +314,6 @@ class Pipe:
                     {"role": message["role"], "content": combined_content.strip()}
                 )
 
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": "All images processed successfully",
-                                "done": False,
-                            },
-                        }
-                    )
             else:
                 processed_messages.append(message)
 
@@ -252,30 +331,32 @@ class Pipe:
             return {"content": error_msg, "format": "text"}
 
         try:
+            # Extract the model from the request path
+            requested_model = body.get("model", "").split("/")[-1]
+            # If not provided, use the first model from our configured models
+            if not requested_model:
+                available_models = self.get_available_models()
+                if available_models:
+                    requested_model = available_models[0]["name"]
+                else:
+                    # Fallback to the first model in the OPENAI_MODELS list
+                    requested_model = self.valves.OPENAI_MODELS.split(",")[0].strip()
+
             system_message, messages = pop_system_message(body.get("messages", []))
             processed_messages = await self.process_messages(
                 messages, __event_emitter__
             )
 
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {"description": "Processing request...", "done": False},
-                    }
-                )
-
-            if "model" not in body:
-                body["model"] = self.valves.MODEL_NAME
-
             payload = {
-                "model": body["model"].split("/")[-1],
+                "model": requested_model,
                 "messages": processed_messages,
                 "max_tokens": min(
-                    body.get("max_tokens", self.valves.CONTEXT_LENGTH),
-                    self.valves.CONTEXT_LENGTH,
+                    body.get(
+                        "num_predict", body.get("max_tokens", self.valves.NUM_PREDICT)
+                    ),
+                    self.valves.NUM_PREDICT,
                 ),
-                "temperature": float(body.get("temperature", 0.7)),
+                "temperature": float(body.get("temperature", self.valves.TEMPERATURE)),
                 "top_p": (
                     float(body.get("top_p", 0.9))
                     if body.get("top_p") is not None
@@ -284,6 +365,7 @@ class Pipe:
                 "stream": body.get("stream", False),
             }
 
+            # Add optional parameters if they exist in the request
             if "top_k" in body:
                 payload["top_k"] = int(body["top_k"])
             if "presence_penalty" in body:
@@ -355,17 +437,6 @@ class Pipe:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=headers, json=payload) as response:
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": "Processing request...",
-                                    "done": False,
-                                },
-                            }
-                        )
-
                     if response.status != 200:
                         error_msg = (
                             f"Error: HTTP {response.status}: {await response.text()}"
