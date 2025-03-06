@@ -20,12 +20,6 @@ from pydantic import BaseModel, Field
 from open_webui.utils.misc import pop_system_message
 
 
-class CacheEntry:
-    def __init__(self, description: str):
-        self.description = description
-        self.timestamp = time.time()
-
-
 class ModelConfig(BaseModel):
     name: str
     context_length: int
@@ -37,8 +31,6 @@ class Pipe:
     MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB per image
     TOTAL_MAX_IMAGE_SIZE = 100 * 1024 * 1024  # 100MB total
     REQUEST_TIMEOUT = (3.05, 60)
-    CACHE_EXPIRATION = 30 * 60  # 30 minutes in seconds
-    MODEL_LIST_CACHE_EXPIRATION = 10 * 60  # 10 minutes in seconds
 
     class Valves(BaseModel):
         OPENAI_API_URL: str = Field(
@@ -54,21 +46,21 @@ class Pipe:
             description="Your Google API key for image processing",
         )
         CONTEXT_LENGTH: int = Field(
-            default=int(os.getenv("CONTEXT_LENGTH", 4096)),
+            default=int(os.getenv("CONTEXT_LENGTH", 32768)),
             description="Maximum context window size for the model",
         )
         NUM_PREDICT: int = Field(
-            default=int(os.getenv("NUM_PREDICT", 2048)),
+            default=int(os.getenv("NUM_PREDICT", 32768)),
             description="Maximum number of tokens to generate (max_tokens/num_predict)",
         )
         TEMPERATURE: float = Field(
-            default=float(os.getenv("TEMPERATURE", 0.6)),
+            default=float(os.getenv("TEMPERATURE", 0.8)),
             description="Default temperature parameter for sampling",
             ge=0.0,
             le=2.0,
         )
         OPENAI_MODELS: str = Field(
-            default=os.getenv("OPENAI_MODELS", "Vision Routed LLM"),
+            default=os.getenv("OPENAI_MODELS", "all"),
             description="Names of the OpenAI-compatible models to use (comma-separated) or 'all' to use all available models",
         )
         GEMINI_MODEL_NAME: str = Field(
@@ -87,7 +79,7 @@ class Pipe:
             description="Show Gemini's raw image descriptions in a collapsible section",
         )
         GEMINI_SECTION_TITLE: str = Field(
-            default=os.getenv("GEMINI_SECTION_TITLE", "🖼️ Gemini Image Descriptions"),
+            default=os.getenv("GEMINI_SECTION_TITLE", "Image Description"),
             description="Title for the collapsible Gemini descriptions section",
         )
 
@@ -97,33 +89,10 @@ class Pipe:
         self.id = "openai-compatible"
         self.valves = self.Valves()
         self.request_id = None
-        self.image_cache = {}
-        self.model_list_cache = {"models": [], "timestamp": 0}
         self.current_gemini_descriptions = []
-
-    def clean_expired_cache(self):
-        """Remove expired entries from cache"""
-        current_time = time.time()
-        expired_keys = [
-            key
-            for key, entry in self.image_cache.items()
-            if current_time - entry.timestamp > self.CACHE_EXPIRATION
-        ]
-        for key in expired_keys:
-            del self.image_cache[key]
 
     def _fetch_openai_models(self) -> List[Dict[str, Any]]:
         """Fetch available models from the OpenAI API"""
-        current_time = time.time()
-
-        # Return cached models if still valid
-        if (
-            current_time - self.model_list_cache["timestamp"]
-            < self.MODEL_LIST_CACHE_EXPIRATION
-            and self.model_list_cache["models"]
-        ):
-            return self.model_list_cache["models"]
-
         try:
             # Determine the base URL and build the models endpoint URL
             api_base = self.valves.OPENAI_API_URL
@@ -144,21 +113,15 @@ class Pipe:
             )
             if response.status_code == 200:
                 data = response.json()
-                models = data.get("data", [])
-
-                # Update cache
-                self.model_list_cache = {"models": models, "timestamp": current_time}
-
-                return models
+                return data.get("data", [])
             else:
                 logging.error(
                     f"Failed to fetch models: HTTP {response.status_code}: {response.text}"
                 )
-                # Return empty list or cached models if available
-                return self.model_list_cache["models"]
+                return []
         except Exception as e:
             logging.error(f"Error fetching OpenAI models: {str(e)}")
-            return self.model_list_cache["models"]
+            return []
 
     def get_available_models(self) -> List[dict]:
         """Get available models based on configuration"""
@@ -223,22 +186,7 @@ class Pipe:
             if not self.valves.GOOGLE_API_KEY:
                 raise ValueError("GOOGLE_API_KEY is required for image processing")
 
-            self.clean_expired_cache()
-
             image_url = image_data.get("image_url", {}).get("url", "")
-            image_key = image_url
-            if image_url.startswith("data:image"):
-                image_key = image_url.split(",", 1)[1] if "," in image_url else ""
-
-            if image_key in self.image_cache:
-                description = self.image_cache[image_key].description
-                logging.info(f"Using cached image description for {image_key[:30]}...")
-                # Store the description for display if enabled
-                if self.valves.SHOW_GEMINI_DESCRIPTIONS:
-                    self.current_gemini_descriptions.append(
-                        {"description": description, "cached": True}
-                    )
-                return description
 
             if __event_emitter__:
                 processing_message = {
@@ -266,19 +214,13 @@ class Pipe:
             response = model.generate_content([prompt, image_part])
             description = response.text
 
-            self.image_cache[image_key] = CacheEntry(description)
-
             # Store the description for display if enabled
             if self.valves.SHOW_GEMINI_DESCRIPTIONS:
                 self.current_gemini_descriptions.append(
-                    {"description": description, "cached": False}
+                    {
+                        "description": description,
+                    }
                 )
-
-            if len(self.image_cache) > 100:
-                oldest_key = min(
-                    self.image_cache.keys(), key=lambda k: self.image_cache[k].timestamp
-                )
-                del self.image_cache[oldest_key]
 
             return description
 
@@ -313,48 +255,83 @@ class Pipe:
     ) -> List[Dict]:
         """Process messages, replacing images with their descriptions."""
         processed_messages = []
-        # Clear previous descriptions
+
+        # Clear current descriptions
         self.current_gemini_descriptions = []
 
-        for message in messages:
+        # Find the last user message with images (that's the only one we'll process with Gemini)
+        last_user_msg_with_images_idx = -1
+        for i in range(len(messages) - 1, -1, -1):  # Iterate backward
+            if messages[i].get("role") == "user":
+                images, _ = self.extract_images_and_text(messages[i])
+                if images:
+                    last_user_msg_with_images_idx = i
+                    break
+
+        # Process all messages (ensure all messages are converted to text format)
+        for i, message in enumerate(messages):
             images, text = self.extract_images_and_text(message)
 
             if images:
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": f"Found {len(images)} image(s) to process",
-                                "done": False,
-                            },
-                        }
-                    )
-
-                image_descriptions = []
-                for idx, image in enumerate(images, 1):
+                if i == last_user_msg_with_images_idx:
+                    # This is the latest user message with images - process them with Gemini
                     if __event_emitter__:
                         await __event_emitter__(
                             {
                                 "type": "status",
                                 "data": {
-                                    "description": f"Processing image {idx} of {len(images)}",
+                                    "description": f"Found {len(images)} new image(s) to process",
                                     "done": False,
                                 },
                             }
                         )
-                    description = await self.process_image_with_gemini(
-                        image, __event_emitter__
+
+                    image_descriptions = []
+                    for idx, image in enumerate(images, 1):
+                        if __event_emitter__:
+                            await __event_emitter__(
+                                {
+                                    "type": "status",
+                                    "data": {
+                                        "description": f"Processing image {idx} of {len(images)}",
+                                        "done": False,
+                                    },
+                                }
+                            )
+                        description = await self.process_image_with_gemini(
+                            image, __event_emitter__
+                        )
+                        image_descriptions.append(f"[Image Description: {description}]")
+
+                    combined_content = text + " " + " ".join(image_descriptions)
+                    processed_messages.append(
+                        {"role": message["role"], "content": combined_content.strip()}
                     )
-                    image_descriptions.append(f"[Image Description: {description}]")
-
-                combined_content = text + " " + " ".join(image_descriptions)
-                processed_messages.append(
-                    {"role": message["role"], "content": combined_content.strip()}
-                )
-
+                else:
+                    # For older messages with images, convert to text format but don't process with Gemini
+                    # Just append placeholders for images
+                    image_placeholders = [f"[Image {i+1}]" for i in range(len(images))]
+                    combined_content = text + " " + " ".join(image_placeholders)
+                    processed_messages.append(
+                        {"role": message["role"], "content": combined_content.strip()}
+                    )
             else:
-                processed_messages.append(message)
+                # Messages with no images can be passed through as-is
+                # If the content is a list, convert it to text for compatibility
+                if isinstance(message.get("content"), list):
+                    # Extract only text parts
+                    text_content = " ".join(
+                        [
+                            part.get("text", "")
+                            for part in message.get("content", [])
+                            if part.get("type") == "text"
+                        ]
+                    )
+                    processed_messages.append(
+                        {"role": message["role"], "content": text_content}
+                    )
+                else:
+                    processed_messages.append(message)
 
         return processed_messages
 
@@ -368,10 +345,9 @@ class Pipe:
 
         # Content inside the details tag
         for idx, desc in enumerate(self.current_gemini_descriptions, 1):
-            cached_label = " (cached)" if desc.get("cached") else ""
             error_prefix = "ERROR: " if desc.get("error") else ""
 
-            result += f"**Image {idx}{cached_label}**\n\n"
+            result += f"**Image {idx}**\n\n"
             result += f"{error_prefix}{desc['description']}\n\n"
 
         # Add separator inside the details tag before closing - using Markdown's horizontal rule
@@ -408,6 +384,10 @@ class Pipe:
             processed_messages = await self.process_messages(
                 messages, __event_emitter__
             )
+
+            # Re-add system message if it exists
+            if system_message:
+                processed_messages.insert(0, system_message)
 
             payload = {
                 "model": requested_model,
