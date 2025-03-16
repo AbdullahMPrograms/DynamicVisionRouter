@@ -1,1 +1,1 @@
-OpenWebUI Dynamic Vision Router for "pseudo"-modality when using text based decoder models
+OpenWebUI Dynamic Vision Router for "pseudo"-modality using an external vision model
