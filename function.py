@@ -30,7 +30,6 @@ class Pipe:
     SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"]
     MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB per image
     TOTAL_MAX_IMAGE_SIZE = 100 * 1024 * 1024  # 100MB total
-    REQUEST_TIMEOUT = (3.05, 60)
 
     class Valves(BaseModel):
         OPENAI_API_URL: str = Field(
@@ -46,21 +45,21 @@ class Pipe:
             description="Your Google API key for image processing",
         )
         CONTEXT_LENGTH: int = Field(
-            default=int(os.getenv("CONTEXT_LENGTH", 32768)),
+            default=int(os.getenv("CONTEXT_LENGTH", 4096)),
             description="Maximum context window size for the model",
         )
         NUM_PREDICT: int = Field(
-            default=int(os.getenv("NUM_PREDICT", 32768)),
+            default=int(os.getenv("NUM_PREDICT", 2048)),
             description="Maximum number of tokens to generate (max_tokens/num_predict)",
         )
         TEMPERATURE: float = Field(
-            default=float(os.getenv("TEMPERATURE", 0.8)),
+            default=float(os.getenv("TEMPERATURE", 0.6)),
             description="Default temperature parameter for sampling",
             ge=0.0,
             le=2.0,
         )
         OPENAI_MODELS: str = Field(
-            default=os.getenv("OPENAI_MODELS", "all"),
+            default=os.getenv("OPENAI_MODELS", "Vision Routed LLM"),
             description="Names of the OpenAI-compatible models to use (comma-separated) or 'all' to use all available models",
         )
         GEMINI_MODEL_NAME: str = Field(
@@ -79,7 +78,7 @@ class Pipe:
             description="Show Gemini's raw image descriptions in a collapsible section",
         )
         GEMINI_SECTION_TITLE: str = Field(
-            default=os.getenv("GEMINI_SECTION_TITLE", "Image Description"),
+            default=os.getenv("GEMINI_SECTION_TITLE", "🖼️ Gemini Image Descriptions"),
             description="Title for the collapsible Gemini descriptions section",
         )
 
@@ -94,7 +93,6 @@ class Pipe:
     def _fetch_openai_models(self) -> List[Dict[str, Any]]:
         """Fetch available models from the OpenAI API"""
         try:
-            # Determine the base URL and build the models endpoint URL
             api_base = self.valves.OPENAI_API_URL
             if "/v1/chat/completions" in api_base:
                 api_base = api_base.replace("/v1/chat/completions", "")
@@ -102,15 +100,12 @@ class Pipe:
                 api_base = api_base.replace("/chat/completions", "")
 
             models_url = f"{api_base.rstrip('/')}/v1/models"
-
             headers = {
                 "Authorization": f"Bearer {self.valves.OPENAI_API_KEY}",
                 "Content-Type": "application/json",
             }
-
-            response = requests.get(
-                models_url, headers=headers, timeout=self.REQUEST_TIMEOUT
-            )
+            # 2s connect timeout, 5s read timeout
+            response = requests.get(models_url, headers=headers, timeout=(2, 5))
             if response.status_code == 200:
                 data = response.json()
                 return data.get("data", [])
@@ -119,16 +114,16 @@ class Pipe:
                     f"Failed to fetch models: HTTP {response.status_code}: {response.text}"
                 )
                 return []
+        except requests.exceptions.Timeout as e:
+            logging.error(f"Timeout fetching OpenAI models: {e}")
+            return []
         except Exception as e:
             logging.error(f"Error fetching OpenAI models: {str(e)}")
             return []
 
     def get_available_models(self) -> List[dict]:
-        """Get available models based on configuration"""
         models_to_use = []
-
         if self.valves.OPENAI_MODELS.lower() == "all":
-            # Fetch and return all models from the API
             all_models = self._fetch_openai_models()
             for model in all_models:
                 models_to_use.append(
@@ -136,36 +131,29 @@ class Pipe:
                         "id": f"{self.id}/{model.get('id')}",
                         "name": model.get("id"),
                         "context_length": self.valves.CONTEXT_LENGTH,
-                        "supports_vision": True,  # Assuming all models support vision - may need refinement
+                        "supports_vision": True,
                     }
                 )
         else:
-            # Return specified models (comma-separated)
-            model_names = [
-                name.strip() for name in self.valves.OPENAI_MODELS.split(",")
-            ]
-            for model_name in model_names:
-                if model_name:
+            model_names = [n.strip() for n in self.valves.OPENAI_MODELS.split(",")]
+            for name in model_names:
+                if name:
                     models_to_use.append(
                         {
-                            "id": f"{self.id}/{model_name}",
-                            "name": model_name,
+                            "id": f"{self.id}/{name}",
+                            "name": name,
                             "context_length": self.valves.CONTEXT_LENGTH,
                             "supports_vision": True,
                         }
                     )
-
         return models_to_use
 
     def pipes(self) -> List[dict]:
         return self.get_available_models()
 
     def extract_images_and_text(self, message: Dict) -> Tuple[List[Dict], str]:
-        """Extract images and text from a message."""
-        images = []
-        text_parts = []
+        images, text_parts = [], []
         content = message.get("content", "")
-
         if isinstance(content, list):
             for item in content:
                 if item.get("type") == "text":
@@ -174,7 +162,6 @@ class Pipe:
                     images.append(item)
         else:
             text_parts.append(content)
-
         return images, " ".join(text_parts)
 
     async def process_image_with_gemini(
@@ -369,23 +356,19 @@ class Pipe:
             return {"content": error_msg, "format": "text"}
 
         try:
-            # Extract the model from the request path
             requested_model = body.get("model", "").split("/")[-1]
-            # If not provided, use the first model from our configured models
             if not requested_model:
                 available_models = self.get_available_models()
-                if available_models:
-                    requested_model = available_models[0]["name"]
-                else:
-                    # Fallback to the first model in the OPENAI_MODELS list
-                    requested_model = self.valves.OPENAI_MODELS.split(",")[0].strip()
+                requested_model = (
+                    available_models[0]["name"]
+                    if available_models
+                    else self.valves.OPENAI_MODELS.split(",")[0].strip()
+                )
 
             system_message, messages = pop_system_message(body.get("messages", []))
             processed_messages = await self.process_messages(
                 messages, __event_emitter__
             )
-
-            # Re-add system message if it exists
             if system_message:
                 processed_messages.insert(0, system_message)
 
@@ -406,29 +389,29 @@ class Pipe:
                 ),
                 "stream": body.get("stream", False),
             }
-
-            # Add optional parameters if they exist in the request
-            if "top_k" in body:
-                payload["top_k"] = int(body["top_k"])
-            if "presence_penalty" in body:
-                payload["presence_penalty"] = float(body["presence_penalty"])
-            if "frequency_penalty" in body:
-                payload["frequency_penalty"] = float(body["frequency_penalty"])
-
+            for opt in (
+                "top_k",
+                "presence_penalty",
+                "frequency_penalty",
+            ):  # optional params
+                if opt in body:
+                    payload[opt] = (
+                        int(body[opt]) if opt == "top_k" else float(body[opt])
+                    )
             payload = {k: v for k, v in payload.items() if v is not None}
+
             headers = {
                 "Authorization": f"Bearer {self.valves.OPENAI_API_KEY}",
                 "Content-Type": "application/json",
             }
 
-            if payload["stream"]:
+            if payload.get("stream"):
                 gemini_desc = ""
                 if (
                     self.valves.SHOW_GEMINI_DESCRIPTIONS
                     and self.current_gemini_descriptions
                 ):
                     gemini_desc = self.format_gemini_descriptions()
-
                 return self._stream_response(
                     url=self.valves.OPENAI_API_URL,
                     headers=headers,
@@ -437,59 +420,77 @@ class Pipe:
                     __event_emitter__=__event_emitter__,
                 )
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.valves.OPENAI_API_URL, headers=headers, json=payload
-                ) as response:
-                    if response.status != 200:
-                        error_msg = (
-                            f"Error: HTTP {response.status}: {await response.text()}"
+            # non-streaming: use explicit aiohttp timeouts
+            timeout = aiohttp.ClientTimeout(connect=1, sock_read=9, total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                try:
+                    async with session.post(
+                        self.valves.OPENAI_API_URL,
+                        headers=headers,
+                        json=payload,
+                    ) as response:
+                        if response.status != 200:
+                            text = await response.text()
+                            err = f"Error: HTTP {response.status}: {text}"
+                            if __event_emitter__:
+                                await __event_emitter__(
+                                    {
+                                        "type": "status",
+                                        "data": {"description": err, "done": True},
+                                    }
+                                )
+                            return {"content": err, "format": "text"}
+
+                        result = await response.json()
+                        if result.get("choices"):
+                            resp_text = result["choices"][0]["message"]["content"]
+                            if (
+                                self.valves.SHOW_GEMINI_DESCRIPTIONS
+                                and self.current_gemini_descriptions
+                            ):
+                                resp_text = (
+                                    self.format_gemini_descriptions() + resp_text
+                                )
+                            if __event_emitter__:
+                                await __event_emitter__(
+                                    {
+                                        "type": "status",
+                                        "data": {
+                                            "description": "Request completed successfully",
+                                            "done": True,
+                                        },
+                                    }
+                                )
+                            return resp_text
+                        return ""
+                except asyncio.TimeoutError:
+                    err = "Error: OpenAI API is unreachable (timeout)."
+                    if __event_emitter__:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {"description": err, "done": True},
+                            }
                         )
-                        if __event_emitter__:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": error_msg,
-                                        "done": True,
-                                    },
-                                }
-                            )
-                        return {"content": error_msg, "format": "text"}
-
-                    result = await response.json()
-                    if "choices" in result and len(result["choices"]) > 0:
-                        response_text = result["choices"][0]["message"]["content"]
-
-                        # If enabled, prepend Gemini descriptions to the response
-                        if (
-                            self.valves.SHOW_GEMINI_DESCRIPTIONS
-                            and self.current_gemini_descriptions
-                        ):
-                            response_text = (
-                                self.format_gemini_descriptions() + response_text
-                            )
-
-                        if __event_emitter__:
-                            await __event_emitter__(
-                                {
-                                    "type": "status",
-                                    "data": {
-                                        "description": "Request completed successfully",
-                                        "done": True,
-                                    },
-                                }
-                            )
-                        return response_text
-                    return ""
+                    return {"content": err, "format": "text"}
+                except aiohttp.ClientError as e:
+                    err = f"Error: network issue talking to OpenAI API: {e}"
+                    if __event_emitter__:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {"description": err, "done": True},
+                            }
+                        )
+                    return {"content": err, "format": "text"}
 
         except Exception as e:
-            error_msg = f"Error: {str(e)}"
+            err = f"Error: {str(e)}"
             if __event_emitter__:
                 await __event_emitter__(
-                    {"type": "status", "data": {"description": error_msg, "done": True}}
+                    {"type": "status", "data": {"description": err, "done": True}}
                 )
-            return {"content": error_msg, "format": "text"}
+            return {"content": err, "format": "text"}
 
     async def _stream_response(
         self,
@@ -504,7 +505,9 @@ class Pipe:
             if gemini_descriptions:
                 yield gemini_descriptions
 
-            async with aiohttp.ClientSession() as session:
+            # Create a client session with no timeout for streaming
+            timeout = aiohttp.ClientTimeout(total=None)  # Disable timeout completely
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(url, headers=headers, json=payload) as response:
                     if response.status != 200:
                         error_msg = (
@@ -542,9 +545,16 @@ class Pipe:
                                     "choices" in data
                                     and len(data["choices"]) > 0
                                     and "delta" in data["choices"][0]
-                                    and "content" in data["choices"][0]["delta"]
                                 ):
-                                    yield data["choices"][0]["delta"]["content"]
+                                    delta_content = data["choices"][0]["delta"].get(
+                                        "content"
+                                    )
+                                    # If delta_content is None, yield an empty string. Otherwise, yield the content.
+                                    yield (
+                                        delta_content
+                                        if delta_content is not None
+                                        else ""
+                                    )
                             except json.JSONDecodeError as e:
                                 logging.error(
                                     f"Failed to parse streaming response: {e}"
