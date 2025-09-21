@@ -184,17 +184,6 @@ class Pipe:
                 )
 
             return error_msg
-        finally:
-            if __event_emitter__:
-                await __event_emitter__(
-                    {
-                        "type": "status",
-                        "data": {
-                            "description": "Generating Response...",
-                            "done": False,
-                        },
-                    }
-                )
 
     async def process_messages(
         self, messages: List[Dict], __event_emitter__=None
@@ -271,6 +260,18 @@ class Pipe:
                     )
                 else:
                     processed_messages.append(message)
+
+        # Emit "Generating Response..." status once after all images are processed
+        if __event_emitter__ and any(self.extract_images_and_text(msg)[0] for msg in messages):
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {
+                        "description": "Generating Response...",
+                        "done": False,
+                    },
+                }
+            )
 
         return processed_messages
 
