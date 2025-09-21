@@ -28,10 +28,6 @@ class ModelConfig(BaseModel):
 
 
 class Pipe:
-    SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"]
-    MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5MB per image
-    TOTAL_MAX_IMAGE_SIZE = 100 * 1024 * 1024  # 100MB total
-
     class Valves(BaseModel):
         OPENAI_API_URL: str = Field(
             default=os.getenv("OPENAI_API_URL", ""),
@@ -405,8 +401,7 @@ class Pipe:
             return result
         except Exception as e:
             logging.error("Error formatting usage status: %s", str(e))
-            # Best-effort fallback
-            return "TG: N/A T/s | PP: N/A T/s | PT: 0 | GT: 0 tokens | TT: 0 tokens | N/A sec"
+            return "Error formatting usage status"
 
     async def pipe(
         self, body: Dict, __event_emitter__=None
