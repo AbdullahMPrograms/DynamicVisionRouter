@@ -1,8 +1,6 @@
 import os
 import json
-import time
 import logging
-import asyncio
 import requests
 import aiohttp
 import google.generativeai as genai  # type: ignore[import-not-found]
@@ -334,7 +332,6 @@ class Pipe:
                 prompt_ms = timings.get("prompt_ms", 0.0)
                 prompt_n = timings.get("prompt_n", prompt_tokens)
                 predicted_n = timings.get("predicted_n", completion_tokens)
-                # Total time = prompt processing + generation time
                 total_ms = prompt_ms + predicted_ms
             else:
                 predicted_per_second = 0.0
@@ -346,18 +343,12 @@ class Pipe:
             # Format the components
             if predicted_per_second > 0:
                 tg_str = f"{predicted_per_second:.2f} T/s"
-            else:
-                tg_str = "TG: N/A T/s"
                 
             if prompt_per_second > 0:
                 pp_str = f"PP: {prompt_per_second:.2f} T/s"
-            else:
-                pp_str = "PP: N/A T/s"
                 
             if total_ms > 0:
                 time_str = f"{total_ms/1000.0:.2f} sec"
-            else:
-                time_str = "N/A sec"
             
             result = f"{tg_str} | {completion_tokens} tokens | {pp_str} | PT: {prompt_n} tokens | TT: {total_tokens} tokens | {time_str}"
             return result
