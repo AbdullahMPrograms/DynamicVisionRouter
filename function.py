@@ -360,7 +360,7 @@ class Pipe:
         return result
 
     def format_usage_status(self, usage: Dict[str, Any], timings: Optional[Dict[str, Any]] = None) -> str:
-        """Return single-line usage summary using llama.cpp timings: "81.75 T/s | 150 tokens | TT: 224 tokens | 1.83 sec"""
+        """Return single-line usage summary: "TG: 81.75 T/s | PP: 70.61 T/s | 150 tokens | TT: 224 tokens | 1.83 sec"""
         try:
             # Log the raw data for debugging
             logging.debug("Raw usage data: %s", json.dumps(usage, indent=2))
@@ -375,6 +375,7 @@ class Pipe:
             # Get timing/throughput data from timings if available
             if timings:
                 predicted_per_second = timings.get("predicted_per_second", 0.0)
+                prompt_per_second = timings.get("prompt_per_second", 0.0)
                 predicted_ms = timings.get("predicted_ms", 0.0)
                 prompt_ms = timings.get("prompt_ms", 0.0)
                 predicted_n = timings.get("predicted_n", completion_tokens)
@@ -382,27 +383,33 @@ class Pipe:
                 total_ms = prompt_ms + predicted_ms
             else:
                 predicted_per_second = 0.0
+                prompt_per_second = 0.0
                 total_ms = 0.0
                 predicted_n = completion_tokens
             
             # Format the components
             if predicted_per_second > 0:
-                tps_str = f"{predicted_per_second:.2f} T/s"
+                tg_str = f"{predicted_per_second:.2f} T/s"
             else:
-                tps_str = "N/A T/s"
+                tg_str = "TG: N/A T/s"
+                
+            if prompt_per_second > 0:
+                pp_str = f"PP: {prompt_per_second:.2f} T/s"
+            else:
+                pp_str = "PP: N/A T/s"
                 
             if total_ms > 0:
                 time_str = f"{total_ms/1000.0:.2f} sec"
             else:
                 time_str = "N/A sec"
             
-            result = f"{tps_str} | {completion_tokens} tokens | TT: {total_tokens} tokens | {time_str}"
+            result = f"{tg_str} | {pp_str} | {completion_tokens} tokens | TT: {total_tokens} tokens | {time_str}"
             logging.debug("Formatted usage status: %s", result)
             return result
         except Exception as e:
             logging.error("Error formatting usage status: %s", str(e))
             # Best-effort fallback
-            return "N/A T/s | 0 tokens | TT: 0 tokens | N/A sec"
+            return "TG: N/A T/s | PP: N/A T/s | 0 tokens | TT: 0 tokens | N/A sec"
 
     async def pipe(
         self, body: Dict, __event_emitter__=None
