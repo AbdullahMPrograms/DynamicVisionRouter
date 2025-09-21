@@ -393,20 +393,16 @@ class Pipe:
                 "max_tokens": body.get("max_tokens"),
                 "temperature": body.get("temperature"),
                 "top_p": body.get("top_p"),
+                "top_k": body.get("top_k"),
+                "min_p": body.get("min_p"),
+                "presence_penalty": body.get("presence_penalty"),
+                "frequency_penalty": body.get("frequency_penalty"),
+                "reasoning_effort": body.get("reasoning_effort"),
                 "stream": True,
             }
-            for opt in (
-                "top_k",
-                "presence_penalty",
-                "frequency_penalty",
-            ):  # optional params
-                if opt in body:
-                    payload[opt] = (
-                        int(body[opt]) if opt == "top_k" else float(body[opt])
-                    )
+            
             payload = {k: v for k, v in payload.items() if v is not None}
 
-            # Always use streaming, request usage statistics in the stream
             payload["stream_options"] = {"include_usage": True}
 
             logging.info(
