@@ -150,7 +150,6 @@ class Pipe:
             else:
                 image_part = {"image_url": image_url}
 
-            # Use the configurable prompt from valves
             prompt = self.valves.IMAGE_DESCRIPTION_PROMPT
             response = model.generate_content([prompt, image_part])
             description = response.text
@@ -245,7 +244,7 @@ class Pipe:
         return processed_messages
 
     def format_usage_status(self, usage: Dict[str, Any], timings: Optional[Dict[str, Any]] = None) -> str:
-        """Return single-line usage summary: "TG: 81.75 T/s | PP: 70.61 T/s | PT: 74 | GT: 150 tokens | TT: 224 tokens | 1.83 sec"""
+        """Return single-line usage summary"""
         try:
             # Get token counts from usage
             completion_tokens = usage.get("completion_tokens", 0)
@@ -262,23 +261,10 @@ class Pipe:
                 predicted_n = timings.get("predicted_n", completion_tokens)
                 total_ms = prompt_ms + predicted_ms
             else:
-                predicted_per_second = 0.0
-                prompt_per_second = 0.0
                 prompt_n = prompt_tokens
-                total_ms = 0.0
                 predicted_n = completion_tokens
-            
-            # Format the components
-            if predicted_per_second > 0:
-                tg_str = f"{predicted_per_second:.2f} T/s"
-                
-            if prompt_per_second > 0:
-                pp_str = f"PP: {prompt_per_second:.2f} T/s"
-                
-            if total_ms > 0:
-                time_str = f"{total_ms/1000.0:.2f} sec"
-            
-            result = f"{tg_str} | {completion_tokens} tokens | {pp_str} | PT: {prompt_n} tokens | TT: {total_tokens} tokens | {time_str}"
+
+            result = f"{predicted_per_second:.2f} T/s | {completion_tokens} tokens | PP: {prompt_per_second:.2f} T/s | PT: {prompt_n} tokens | TT: {total_tokens} tokens | {total_ms/1000.0:.2f} sec"
             return result
         except Exception as e:
             logging.error("Error formatting usage status: %s", str(e))
@@ -333,9 +319,8 @@ class Pipe:
             payload = self.build_dynamic_payload(body, requested_model, processed_messages)
 
             logging.info(
-                "Prepared payload: model=%s, max_tokens=%s",
-                payload.get("model"),
-                payload.get("max_tokens"),
+                "Prepared payload: %s",
+                payload,
             )
 
             headers = {
@@ -411,11 +396,6 @@ class Pipe:
                                                 "type": "status", 
                                                 "data": {"description": stats, "done": True}
                                             })
-                                        else:
-                                            await __event_emitter__({
-                                                "type": "status",
-                                                "data": {"description": "Request completed", "done": True},
-                                            })
                                     break
 
                                 data = json.loads(line_text)
@@ -426,26 +406,16 @@ class Pipe:
                                     if "timings" in data:
                                         timings_captured = data["timings"]
                                     # Do not yield anything for usage-only messages
-                                    if not (
-                                        "choices" in data
-                                        and len(data["choices"]) > 0
-                                        and "delta" in data["choices"][0]
-                                    ):
-                                        continue
-                                if (
-                                    "choices" in data
-                                    and len(data["choices"]) > 0
-                                    and "delta" in data["choices"][0]
-                                ):
-                                    delta_content = data["choices"][0]["delta"].get(
-                                        "content"
-                                    )
-                                    # If delta_content is None, yield an empty string. Otherwise, yield the content.
-                                    yield (
-                                        delta_content
-                                        if delta_content is not None
-                                        else ""
-                                    )
+                                    continue
+                                
+                                # Extract content from the streaming response
+                                delta_content = data.get("choices", [{}])[0].get("delta", {}).get("content")
+                                # If delta_content is None, yield an empty string. Otherwise, yield the content.
+                                yield (
+                                    delta_content
+                                    if delta_content is not None
+                                    else ""
+                                )
                             except json.JSONDecodeError as e:
                                 logging.error(
                                     f"Failed to parse streaming response: {e}"
