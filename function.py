@@ -370,10 +370,9 @@ class Pipe:
         Dynamically build the payload by extracting ALL parameters from the request body.
         This automatically supports any new or custom parameters without requiring code changes.
         """
-        # Parameters to exclude (handled separately or system-specific)
         excluded_parameters = {
-            'model',     # Handled separately as we extract it from the model path
-            'messages',  # Handled separately after processing for images
+            'model',    
+            'messages',  
         }
         
         # Start with required parameters
@@ -387,9 +386,6 @@ class Pipe:
         for param, value in body.items():
             if param not in excluded_parameters and value is not None:
                 payload[param] = value
-        
-        # Always ensure stream_options is set for usage tracking (override if present)
-        #payload["stream_options"] = {"include_usage": True}
         
         logging.debug("Built dynamic payload with parameters: %s", list(payload.keys()))
         return payload
