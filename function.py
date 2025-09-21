@@ -8,9 +8,6 @@ import aiohttp
 import google.generativeai as genai  # type: ignore[import-not-found]
 from typing import (
     List,
-    Union,
-    Generator,
-    Iterator,
     Dict,
     Optional,
     AsyncIterator,
@@ -391,7 +388,7 @@ class Pipe:
 
     async def pipe(
         self, body: Dict, __event_emitter__=None
-    ) -> Union[str, Generator, Iterator, AsyncIterator[str], Dict[str, str]]:
+    ) -> AsyncIterator[str]:
         if not all([self.valves.OPENAI_API_URL, self.valves.OPENAI_API_KEY]):
             error_msg = "Error: OPENAI_API_URL and OPENAI_API_KEY are required"
             if __event_emitter__:
@@ -425,7 +422,7 @@ class Pipe:
                     if body.get("top_p") is not None
                     else None
                 ),
-                "stream": body.get("stream", False),
+                "stream": True,
             }
             for opt in (
                 "top_k",
@@ -438,16 +435,14 @@ class Pipe:
                     )
             payload = {k: v for k, v in payload.items() if v is not None}
 
-            # If streaming, request usage statistics in the stream
-            if payload.get("stream"):
-                payload["stream_options"] = {"include_usage": True}
+            # Always use streaming, request usage statistics in the stream
+            payload["stream_options"] = {"include_usage": True}
 
             logging.info(
-                "Prepared payload: model=%s, max_tokens=%s, temperature=%.2f, streaming=%s",
+                "Prepared payload: model=%s, max_tokens=%s, temperature=%.2f",
                 payload.get("model"),
                 payload.get("max_tokens"),
                 payload.get("temperature"),
-                payload.get("stream", False),
             )
 
             headers = {
@@ -455,94 +450,19 @@ class Pipe:
                 "Content-Type": "application/json",
             }
 
-            if payload.get("stream"):
-                gemini_desc = ""
-                if (
-                    self.valves.SHOW_GEMINI_DESCRIPTIONS
-                    and self.current_gemini_descriptions
-                ):
-                    gemini_desc = self.format_gemini_descriptions()
-                return self._stream_response(
-                    url=self.valves.OPENAI_API_URL,
-                    headers=headers,
-                    payload=payload,
-                    gemini_descriptions=gemini_desc,
-                    __event_emitter__=__event_emitter__,
-                )
-
-            # non-streaming: use explicit aiohttp timeouts
-            timeout = aiohttp.ClientTimeout(connect=1, sock_read=9, total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                try:
-                    logging.info("Sending request to %s", self.valves.OPENAI_API_URL)
-                    async with session.post(
-                        self.valves.OPENAI_API_URL,
-                        headers=headers,
-                        json=payload,
-                    ) as response:
-                        if response.status != 200:
-                            text = await response.text()
-                            err = f"Error: HTTP {response.status}: {text}"
-                            logging.error("HTTP error: %s", err)
-                            if __event_emitter__:
-                                await __event_emitter__(
-                                    {
-                                        "type": "status",
-                                        "data": {"description": err, "done": True},
-                                    }
-                                )
-                            return {"content": err, "format": "text"}
-
-                        result = await response.json()
-                        logging.debug("Response received with choices and usage data")
-                        if result.get("choices"):
-                            resp_text = result["choices"][0]["message"]["content"]
-                            if (
-                                self.valves.SHOW_GEMINI_DESCRIPTIONS
-                                and self.current_gemini_descriptions
-                            ):
-                                resp_text = (
-                                    self.format_gemini_descriptions() + resp_text
-                                )
-                            # Emit usage stats to the frontend if available
-                            if __event_emitter__ and result.get("usage"):
-                                # Send usage as a status message to be visible in OpenWebUI
-                                timings = result.get("timings")
-                                stats = self.format_usage_status(result["usage"], timings)
-                                await __event_emitter__({
-                                    "type": "status",
-                                    "data": {"description": stats, "done": True},
-                                })
-                            elif __event_emitter__:
-                                # Fallback status if usage isn't available
-                                await __event_emitter__({
-                                    "type": "status",
-                                    "data": {"description": "Request completed successfully", "done": True},
-                                })
-                            return resp_text
-                        return ""
-                except asyncio.TimeoutError:
-                    err = "Error: OpenAI API is unreachable (timeout)."
-                    logging.error("Request timeout: %s", err)
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {"description": err, "done": True},
-                            }
-                        )
-                    return {"content": err, "format": "text"}
-                except aiohttp.ClientError as e:
-                    err = f"Error: network issue talking to OpenAI API: {e}"
-                    logging.error("Client error: %s", str(e))
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {"description": err, "done": True},
-                            }
-                        )
-                    return {"content": err, "format": "text"}
+            gemini_desc = ""
+            if (
+                self.valves.SHOW_GEMINI_DESCRIPTIONS
+                and self.current_gemini_descriptions
+            ):
+                gemini_desc = self.format_gemini_descriptions()
+            return self._stream_response(
+                url=self.valves.OPENAI_API_URL,
+                headers=headers,
+                payload=payload,
+                gemini_descriptions=gemini_desc,
+                __event_emitter__=__event_emitter__,
+            )
 
         except Exception as e:
             err = f"Error: {str(e)}"
