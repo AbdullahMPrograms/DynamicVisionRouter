@@ -20,9 +20,7 @@ from open_webui.utils.misc import pop_system_message  # type: ignore[import-not-
 
 class ModelConfig(BaseModel):
     name: str
-    context_length: int
     alias: Optional[str] = None
-
 
 class Pipe:
     class Valves(BaseModel):
@@ -37,20 +35,6 @@ class Pipe:
         GOOGLE_API_KEY: str = Field(
             default=os.getenv("GOOGLE_API_KEY", ""),
             description="Your Google API key for image processing",
-        )
-        CONTEXT_LENGTH: int = Field(
-            default=int(os.getenv("CONTEXT_LENGTH", 4096)),
-            description="Maximum context window size for the model",
-        )
-        NUM_PREDICT: int = Field(
-            default=int(os.getenv("NUM_PREDICT", 2048)),
-            description="Maximum number of tokens to generate (max_tokens/num_predict)",
-        )
-        TEMPERATURE: float = Field(
-            default=float(os.getenv("TEMPERATURE", 0.6)),
-            description="Default temperature parameter for sampling",
-            ge=0.0,
-            le=2.0,
         )
         OPENAI_MODELS: str = Field(
             default=os.getenv("OPENAI_MODELS", "Vision Routed LLM"),
@@ -72,7 +56,7 @@ class Pipe:
             description="Show Gemini's raw image descriptions in a collapsible section",
         )
         GEMINI_SECTION_TITLE: str = Field(
-            default=os.getenv("GEMINI_SECTION_TITLE", "🖼️ Gemini Image Descriptions"),
+            default=os.getenv("GEMINI_SECTION_TITLE", "Image Descriptions"),
             description="Title for the collapsible Gemini descriptions section",
         )
 
@@ -121,7 +105,6 @@ class Pipe:
                     {
                         "id": f"{self.id}/{model.get('id')}",
                         "name": model.get("id"),
-                        "context_length": self.valves.CONTEXT_LENGTH,
                         "supports_vision": True,
                     }
                 )
@@ -133,7 +116,6 @@ class Pipe:
                         {
                             "id": f"{self.id}/{name}",
                             "name": name,
-                            "context_length": self.valves.CONTEXT_LENGTH,
                             "supports_vision": True,
                         }
                     )
@@ -410,18 +392,9 @@ class Pipe:
             payload = {
                 "model": requested_model,
                 "messages": processed_messages,
-                "max_tokens": min(
-                    body.get(
-                        "num_predict", body.get("max_tokens", self.valves.NUM_PREDICT)
-                    ),
-                    self.valves.NUM_PREDICT,
-                ),
-                "temperature": float(body.get("temperature", self.valves.TEMPERATURE)),
-                "top_p": (
-                    float(body.get("top_p", 0.9))
-                    if body.get("top_p") is not None
-                    else None
-                ),
+                "max_tokens": body.get("max_tokens"),
+                "temperature": body.get("temperature"),
+                "top_p": body.get("top_p"),
                 "stream": True,
             }
             for opt in (
@@ -439,10 +412,9 @@ class Pipe:
             payload["stream_options"] = {"include_usage": True}
 
             logging.info(
-                "Prepared payload: model=%s, max_tokens=%s, temperature=%.2f",
+                "Prepared payload: model=%s, max_tokens=%s",
                 payload.get("model"),
                 payload.get("max_tokens"),
-                payload.get("temperature"),
             )
 
             headers = {
