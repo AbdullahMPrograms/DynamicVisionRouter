@@ -2,9 +2,10 @@ import os
 import json
 import time
 import logging
+import asyncio
 import requests
 import aiohttp
-import google.generativeai as genai
+import google.generativeai as genai  # type: ignore[import-not-found]
 from typing import (
     List,
     Union,
@@ -17,7 +18,7 @@ from typing import (
     Any,
 )
 from pydantic import BaseModel, Field
-from open_webui.utils.misc import pop_system_message
+from open_webui.utils.misc import pop_system_message  # type: ignore[import-not-found]
 
 
 class ModelConfig(BaseModel):
@@ -189,9 +190,9 @@ class Pipe:
             model = genai.GenerativeModel(self.valves.GEMINI_MODEL_NAME)
 
             if image_url.startswith("data:image"):
-                image_data = image_url.split(",", 1)[1] if "," in image_url else ""
+                base64_data = image_url.split(",", 1)[1] if "," in image_url else ""
                 image_part = {
-                    "inline_data": {"mime_type": "image/jpeg", "data": image_data}
+                    "inline_data": {"mime_type": "image/jpeg", "data": base64_data}
                 }
             else:
                 image_part = {"image_url": image_url}
@@ -245,6 +246,7 @@ class Pipe:
 
         # Clear current descriptions
         self.current_gemini_descriptions = []
+        logging.debug("Starting process_messages: total_messages=%d", len(messages))
 
         # Find the last user message with images (that's the only one we'll process with Gemini)
         last_user_msg_with_images_idx = -1
@@ -253,6 +255,11 @@ class Pipe:
                 images, _ = self.extract_images_and_text(messages[i])
                 if images:
                     last_user_msg_with_images_idx = i
+                    logging.debug(
+                        "Last user msg with images index found: %d (image_count=%d)",
+                        i,
+                        len(images),
+                    )
                     break
 
         # Process all messages (ensure all messages are converted to text format)
@@ -261,6 +268,9 @@ class Pipe:
 
             if images:
                 if i == last_user_msg_with_images_idx:
+                    logging.info(
+                        "Processing latest user message with images: count=%d", len(images)
+                    )
                     # This is the latest user message with images - process them with Gemini
                     if __event_emitter__:
                         await __event_emitter__(
@@ -295,6 +305,11 @@ class Pipe:
                         {"role": message["role"], "content": combined_content.strip()}
                     )
                 else:
+                    logging.debug(
+                        "Skipping image processing for older message with images: index=%d count=%d",
+                        i,
+                        len(images),
+                    )
                     # For older messages with images, convert to text format but don't process with Gemini
                     # Just append placeholders for images
                     image_placeholders = [f"[Image {i+1}]" for i in range(len(images))]
@@ -344,9 +359,54 @@ class Pipe:
         result += "</details>\n\n"
         return result
 
+    def format_usage_status(self, usage: Dict[str, Any], timings: Optional[Dict[str, Any]] = None) -> str:
+        """Return single-line usage summary using llama.cpp timings: "81.75 T/s | 150 tokens | TT: 224 tokens | 1.83 sec"""
+        try:
+            # Log the raw data for debugging
+            logging.debug("Raw usage data: %s", json.dumps(usage, indent=2))
+            if timings:
+                logging.debug("Raw timings data: %s", json.dumps(timings, indent=2))
+            
+            # Get token counts from usage
+            completion_tokens = usage.get("completion_tokens", 0)
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+            
+            # Get timing/throughput data from timings if available
+            if timings:
+                predicted_per_second = timings.get("predicted_per_second", 0.0)
+                predicted_ms = timings.get("predicted_ms", 0.0)
+                prompt_ms = timings.get("prompt_ms", 0.0)
+                predicted_n = timings.get("predicted_n", completion_tokens)
+                # Total time = prompt processing + generation time
+                total_ms = prompt_ms + predicted_ms
+            else:
+                predicted_per_second = 0.0
+                total_ms = 0.0
+                predicted_n = completion_tokens
+            
+            # Format the components
+            if predicted_per_second > 0:
+                tps_str = f"{predicted_per_second:.2f} T/s"
+            else:
+                tps_str = "N/A T/s"
+                
+            if total_ms > 0:
+                time_str = f"{total_ms/1000.0:.2f} sec"
+            else:
+                time_str = "N/A sec"
+            
+            result = f"{tps_str} | {completion_tokens} tokens | TT: {total_tokens} tokens | {time_str}"
+            logging.debug("Formatted usage status: %s", result)
+            return result
+        except Exception as e:
+            logging.error("Error formatting usage status: %s", str(e))
+            # Best-effort fallback
+            return "N/A T/s | 0 tokens | TT: 0 tokens | N/A sec"
+
     async def pipe(
         self, body: Dict, __event_emitter__=None
-    ) -> Union[str, Generator, Iterator]:
+    ) -> Union[str, Generator, Iterator, AsyncIterator[str], Dict[str, str]]:
         if not all([self.valves.OPENAI_API_URL, self.valves.OPENAI_API_KEY]):
             error_msg = "Error: OPENAI_API_URL and OPENAI_API_KEY are required"
             if __event_emitter__:
@@ -400,6 +460,25 @@ class Pipe:
                     )
             payload = {k: v for k, v in payload.items() if v is not None}
 
+            # If streaming, request usage statistics in the stream
+            if payload.get("stream"):
+                payload["stream_options"] = {"include_usage": True}
+                logging.info(
+                    "Prepared payload for streaming with usage: model=%s, max_tokens=%s, temperature=%.2f, top_p=%s",
+                    payload.get("model"),
+                    payload.get("max_tokens"),
+                    payload.get("temperature"),
+                    payload.get("top_p"),
+                )
+            else:
+                logging.info(
+                    "Prepared payload for non-streaming: model=%s, max_tokens=%s, temperature=%.2f, top_p=%s",
+                    payload.get("model"),
+                    payload.get("max_tokens"),
+                    payload.get("temperature"),
+                    payload.get("top_p"),
+                )
+
             headers = {
                 "Authorization": f"Bearer {self.valves.OPENAI_API_KEY}",
                 "Content-Type": "application/json",
@@ -424,6 +503,7 @@ class Pipe:
             timeout = aiohttp.ClientTimeout(connect=1, sock_read=9, total=10)
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 try:
+                    logging.info("Sending non-streaming request to %s", self.valves.OPENAI_API_URL)
                     async with session.post(
                         self.valves.OPENAI_API_URL,
                         headers=headers,
@@ -432,6 +512,7 @@ class Pipe:
                         if response.status != 200:
                             text = await response.text()
                             err = f"Error: HTTP {response.status}: {text}"
+                            logging.error("Non-streaming HTTP error: %s", err)
                             if __event_emitter__:
                                 await __event_emitter__(
                                     {
@@ -442,6 +523,11 @@ class Pipe:
                             return {"content": err, "format": "text"}
 
                         result = await response.json()
+                        logging.info(
+                            "Non-streaming response received: has_choices=%s, has_usage=%s",
+                            bool(result.get("choices")),
+                            bool(result.get("usage")),
+                        )
                         if result.get("choices"):
                             resp_text = result["choices"][0]["message"]["content"]
                             if (
@@ -451,20 +537,39 @@ class Pipe:
                                 resp_text = (
                                     self.format_gemini_descriptions() + resp_text
                                 )
-                            if __event_emitter__:
+                            # Emit usage stats to the frontend if available
+                            if __event_emitter__ and result.get("usage"):
+                                logging.info("Emitting usage (non-streaming)")
+                                await __event_emitter__(
+                                    {"type": "usage", "data": result["usage"]}
+                                )
+                                # Also send usage as a status message to be visible in OpenWebUI
+                                logging.info("Raw usage data received (non-streaming): %s", json.dumps(result["usage"]))
+                                timings = result.get("timings")
+                                if timings:
+                                    logging.info("Raw timings data received (non-streaming): %s", json.dumps(timings))
+                                stats = self.format_usage_status(result["usage"], timings)
+                                logging.info("Emitting status with usage (non-streaming): %s", stats)
                                 await __event_emitter__(
                                     {
                                         "type": "status",
-                                        "data": {
-                                            "description": "Request completed successfully",
-                                            "done": True,
-                                        },
+                                        "data": {"description": stats, "done": True},
+                                    }
+                                )
+                            elif __event_emitter__:
+                                # Fallback status if usage isn't available
+                                logging.debug("Emitting status: Request completed successfully (no usage)")
+                                await __event_emitter__(
+                                    {
+                                        "type": "status",
+                                        "data": {"description": "Request completed successfully", "done": True},
                                     }
                                 )
                             return resp_text
                         return ""
                 except asyncio.TimeoutError:
                     err = "Error: OpenAI API is unreachable (timeout)."
+                    logging.error("Non-streaming timeout: %s", err)
                     if __event_emitter__:
                         await __event_emitter__(
                             {
@@ -475,6 +580,7 @@ class Pipe:
                     return {"content": err, "format": "text"}
                 except aiohttp.ClientError as e:
                     err = f"Error: network issue talking to OpenAI API: {e}"
+                    logging.error("Non-streaming client error: %s", err)
                     if __event_emitter__:
                         await __event_emitter__(
                             {
@@ -486,6 +592,7 @@ class Pipe:
 
         except Exception as e:
             err = f"Error: {str(e)}"
+            logging.exception("Unhandled error in pipe: %s", err)
             if __event_emitter__:
                 await __event_emitter__(
                     {"type": "status", "data": {"description": err, "done": True}}
@@ -503,16 +610,23 @@ class Pipe:
         try:
             # First yield the Gemini descriptions if we have them
             if gemini_descriptions:
+                logging.debug("Yielding Gemini descriptions block (%d chars)", len(gemini_descriptions))
                 yield gemini_descriptions
 
             # Create a client session with no timeout for streaming
             timeout = aiohttp.ClientTimeout(total=None)  # Disable timeout completely
             async with aiohttp.ClientSession(timeout=timeout) as session:
+                logging.info(
+                    "Starting streaming request to %s (include_usage=%s)",
+                    url,
+                    bool(payload.get("stream_options", {}).get("include_usage")),
+                )
                 async with session.post(url, headers=headers, json=payload) as response:
                     if response.status != 200:
                         error_msg = (
                             f"Error: HTTP {response.status}: {await response.text()}"
                         )
+                        logging.error("Streaming HTTP error: %s", error_msg)
                         if __event_emitter__:
                             await __event_emitter__(
                                 {
@@ -523,24 +637,54 @@ class Pipe:
                         yield error_msg
                         return
 
+                    usage_captured: Optional[Dict[str, Any]] = None
+                    timings_captured: Optional[Dict[str, Any]] = None
                     async for line in response.content:
                         if line and line.startswith(b"data: "):
                             try:
                                 line_text = line[6:].decode("utf-8")
                                 if line_text.strip() == "[DONE]":
+                                    # On completion, push usage as a status if available; otherwise emit generic completion
+                                    logging.info("Streaming: received [DONE]")
                                     if __event_emitter__:
-                                        await __event_emitter__(
-                                            {
-                                                "type": "status",
-                                                "data": {
-                                                    "description": "Request completed",
-                                                    "done": True,
-                                                },
-                                            }
-                                        )
+                                        if usage_captured:
+                                            logging.info("Raw usage data received: %s", json.dumps(usage_captured))
+                                            if timings_captured:
+                                                logging.info("Raw timings data received: %s", json.dumps(timings_captured))
+                                            stats = self.format_usage_status(usage_captured, timings_captured)
+                                            logging.info("Streaming: emitting status with usage: %s", stats)
+                                            await __event_emitter__(
+                                                {"type": "status", "data": {"description": stats, "done": True}}
+                                            )
+                                        else:
+                                            await __event_emitter__(
+                                                {
+                                                    "type": "status",
+                                                    "data": {"description": "Request completed", "done": True},
+                                                }
+                                            )
                                     break
 
                                 data = json.loads(line_text)
+                                # If usage information is included in the stream, emit it to the frontend
+                                if isinstance(data, dict) and data.get("usage"):
+                                    usage_captured = data["usage"]
+                                    # Also capture timings if present
+                                    if "timings" in data:
+                                        timings_captured = data["timings"]
+                                    if __event_emitter__:
+                                        logging.info("Streaming: usage frame received; emitting usage")
+                                        await __event_emitter__(
+                                            {"type": "usage", "data": usage_captured}
+                                        )
+                                    # Do not yield anything for usage-only messages
+                                    if not (
+                                        "choices" in data
+                                        and len(data["choices"]) > 0
+                                        and "delta" in data["choices"][0]
+                                    ):
+                                        logging.debug("Streaming: usage-only frame; no delta to yield")
+                                        continue
                                 if (
                                     "choices" in data
                                     and len(data["choices"]) > 0
@@ -549,6 +693,12 @@ class Pipe:
                                     delta_content = data["choices"][0]["delta"].get(
                                         "content"
                                     )
+                                    if delta_content:
+                                        logging.debug(
+                                            "Streaming: yielding delta chunk (len=%d)", len(delta_content)
+                                        )
+                                    else:
+                                        logging.debug("Streaming: empty delta chunk")
                                     # If delta_content is None, yield an empty string. Otherwise, yield the content.
                                     yield (
                                         delta_content
@@ -563,6 +713,7 @@ class Pipe:
 
         except Exception as e:
             error_msg = f"Stream error: {str(e)}"
+            logging.exception("Unhandled streaming error: %s", error_msg)
             if __event_emitter__:
                 await __event_emitter__(
                     {"type": "status", "data": {"description": error_msg, "done": True}}
