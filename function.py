@@ -37,7 +37,7 @@ class Pipe:
             description="Your Google API key for image processing",
         )
         OPENAI_MODELS: str = Field(
-            default=os.getenv("OPENAI_MODELS", "Vision Routed LLM"),
+            default=os.getenv("OPENAI_MODELS", "all"),
             description="Names of the OpenAI-compatible models to use (comma-separated) or 'all' to use all available models",
         )
         GEMINI_MODEL_NAME: str = Field(
