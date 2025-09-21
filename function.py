@@ -169,7 +169,7 @@ class Pipe:
             else:
                 image_part = {"image_url": image_url}
 
-            # Use the configurable prompt from valves instead of hard-coded text
+            # Use the configurable prompt from valves
             prompt = self.valves.IMAGE_DESCRIPTION_PROMPT
             response = model.generate_content([prompt, image_part])
             description = response.text
@@ -195,7 +195,7 @@ class Pipe:
                 )
 
             return error_msg
-        finally:
+        finally:    #could be a potential optimization to avoid redundant code
             if __event_emitter__ and processing_message:
                 # Clear the processing message by sending a completion update
                 await __event_emitter__(
@@ -377,7 +377,8 @@ class Pipe:
                 await __event_emitter__(
                     {"type": "status", "data": {"description": error_msg, "done": True}}
                 )
-            return {"content": error_msg, "format": "text"}
+            yield error_msg
+            return
 
         try:
             requested_model = body.get("model", "").split("/")[-1]
@@ -428,13 +429,14 @@ class Pipe:
                 and self.current_gemini_descriptions
             ):
                 gemini_desc = self.format_gemini_descriptions()
-            return self._stream_response(
+            async for chunk in self._stream_response(
                 url=self.valves.OPENAI_API_URL,
                 headers=headers,
                 payload=payload,
                 gemini_descriptions=gemini_desc,
                 __event_emitter__=__event_emitter__,
-            )
+            ):
+                yield chunk
 
         except Exception as e:
             err = f"Error: {str(e)}"
@@ -443,7 +445,8 @@ class Pipe:
                 await __event_emitter__(
                     {"type": "status", "data": {"description": err, "done": True}}
                 )
-            return {"content": err, "format": "text"}
+            yield err
+            return
 
     async def _stream_response(
         self,
