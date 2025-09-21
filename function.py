@@ -365,6 +365,35 @@ class Pipe:
             logging.error("Error formatting usage status: %s", str(e))
             return "Error formatting usage status"
 
+    def build_dynamic_payload(self, body: Dict, model: str, messages: List[Dict]) -> Dict[str, Any]:
+        """
+        Dynamically build the payload by extracting ALL parameters from the request body.
+        This automatically supports any new or custom parameters without requiring code changes.
+        """
+        # Parameters to exclude (handled separately or system-specific)
+        excluded_parameters = {
+            'model',     # Handled separately as we extract it from the model path
+            'messages',  # Handled separately after processing for images
+        }
+        
+        # Start with required parameters
+        payload = {
+            "model": model,
+            "messages": messages
+        }
+        
+        # Add ALL parameters from the body except excluded ones
+        # and filter out None values
+        for param, value in body.items():
+            if param not in excluded_parameters and value is not None:
+                payload[param] = value
+        
+        # Always ensure stream_options is set for usage tracking (override if present)
+        #payload["stream_options"] = {"include_usage": True}
+        
+        logging.debug("Built dynamic payload with parameters: %s", list(payload.keys()))
+        return payload
+
     async def pipe(
         self, body: Dict, __event_emitter__=None
     ) -> AsyncIterator[str]:
@@ -387,23 +416,7 @@ class Pipe:
             if system_message:
                 processed_messages.insert(0, system_message)
 
-            payload = {
-                "model": requested_model,
-                "messages": processed_messages,
-                "max_tokens": body.get("max_tokens"),
-                "temperature": body.get("temperature"),
-                "top_p": body.get("top_p"),
-                "top_k": body.get("top_k"),
-                "min_p": body.get("min_p"),
-                "presence_penalty": body.get("presence_penalty"),
-                "frequency_penalty": body.get("frequency_penalty"),
-                "reasoning_effort": body.get("reasoning_effort"),
-                "stream": True,
-            }
-            
-            payload = {k: v for k, v in payload.items() if v is not None}
-
-            payload["stream_options"] = {"include_usage": True}
+            payload = self.build_dynamic_payload(body, requested_model, processed_messages)
 
             logging.info(
                 "Prepared payload: model=%s, max_tokens=%s",
