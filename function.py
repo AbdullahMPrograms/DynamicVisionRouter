@@ -80,7 +80,7 @@ class Pipe:
                 "Authorization": f"Bearer {self.valves.OPENAI_API_KEY}",
                 "Content-Type": "application/json",
             }
-            # 2s connect timeout, 5s read timeout
+            # 2s connect timeout, 5s read timeout, needed for latency reasons
             response = requests.get(models_url, headers=headers, timeout=(2, 5))
             if response.status_code == 200:
                 data = response.json()
@@ -123,6 +123,7 @@ class Pipe:
         return self.get_available_models()
 
     def extract_images_and_text(self, message: Dict) -> Tuple[List[Dict], str]:
+        # Extract images and text from a message content, separating for processing
         images, text_parts = [], []
         content = message.get("content", "")
         if isinstance(content, list):
@@ -138,23 +139,13 @@ class Pipe:
     async def process_image_with_gemini(
         self, image_data: Dict, __event_emitter__=None
     ) -> str:
-        """Process a single image with Gemini and return its description."""
+        """Process an image with Gemini and return its description."""
         processing_message = None
         try:
             if not self.valves.GOOGLE_API_KEY:
                 raise ValueError("GOOGLE_API_KEY is required for image processing")
 
             image_url = image_data.get("image_url", {}).get("url", "")
-
-            if __event_emitter__:
-                processing_message = {
-                    "type": "status",
-                    "data": {
-                        "description": "Processing new image...",
-                        "done": False,
-                    },
-                }
-                await __event_emitter__(processing_message)
 
             genai.configure(api_key=self.valves.GOOGLE_API_KEY)
             model = genai.GenerativeModel(self.valves.GEMINI_MODEL_NAME)
@@ -194,13 +185,13 @@ class Pipe:
 
             return error_msg
         finally:
-            if __event_emitter__ and processing_message:
+            if __event_emitter__:
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
                             "description": "Generating Response...",
-                            "done": True,
+                            "done": False,
                         },
                     }
                 )
@@ -232,17 +223,6 @@ class Pipe:
             if images:
                 if i == last_user_msg_with_images_idx:
                     logging.info("Processing %d images in latest user message", len(images))
-                    # This is the latest user message with images - process them with Gemini
-                    if __event_emitter__:
-                        await __event_emitter__(
-                            {
-                                "type": "status",
-                                "data": {
-                                    "description": f"Found {len(images)} new image(s) to process",
-                                    "done": False,
-                                },
-                            }
-                        )
 
                     image_descriptions = []
                     for idx, image in enumerate(images, 1):
