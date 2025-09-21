@@ -381,8 +381,7 @@ class Pipe:
             "messages": messages
         }
         
-        # Add ALL parameters from the body except excluded ones
-        # and filter out None values
+        # Add ALL parameters from the body except excluded ones and filter out None values
         for param, value in body.items():
             if param not in excluded_parameters and value is not None:
                 payload[param] = value
