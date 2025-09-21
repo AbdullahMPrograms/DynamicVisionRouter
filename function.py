@@ -362,11 +362,6 @@ class Pipe:
     def format_usage_status(self, usage: Dict[str, Any], timings: Optional[Dict[str, Any]] = None) -> str:
         """Return single-line usage summary: "TG: 81.75 T/s | PP: 70.61 T/s | PT: 74 | GT: 150 tokens | TT: 224 tokens | 1.83 sec"""
         try:
-            # Log the raw data for debugging
-            logging.debug("Raw usage data: %s", json.dumps(usage, indent=2))
-            if timings:
-                logging.debug("Raw timings data: %s", json.dumps(timings, indent=2))
-            
             # Get token counts from usage
             completion_tokens = usage.get("completion_tokens", 0)
             prompt_tokens = usage.get("prompt_tokens", 0)
@@ -548,32 +543,19 @@ class Pipe:
                                 )
                             # Emit usage stats to the frontend if available
                             if __event_emitter__ and result.get("usage"):
-                                logging.info("Emitting usage (non-streaming)")
-                                await __event_emitter__(
-                                    {"type": "usage", "data": result["usage"]}
-                                )
-                                # Also send usage as a status message to be visible in OpenWebUI
-                                logging.info("Raw usage data received (non-streaming): %s", json.dumps(result["usage"]))
+                                # Send usage as a status message to be visible in OpenWebUI
                                 timings = result.get("timings")
-                                if timings:
-                                    logging.info("Raw timings data received (non-streaming): %s", json.dumps(timings))
                                 stats = self.format_usage_status(result["usage"], timings)
-                                logging.info("Emitting status with usage (non-streaming): %s", stats)
-                                await __event_emitter__(
-                                    {
-                                        "type": "status",
-                                        "data": {"description": stats, "done": True},
-                                    }
-                                )
+                                await __event_emitter__({
+                                    "type": "status",
+                                    "data": {"description": stats, "done": True},
+                                })
                             elif __event_emitter__:
                                 # Fallback status if usage isn't available
-                                logging.debug("Emitting status: Request completed successfully (no usage)")
-                                await __event_emitter__(
-                                    {
-                                        "type": "status",
-                                        "data": {"description": "Request completed successfully", "done": True},
-                                    }
-                                )
+                                await __event_emitter__({
+                                    "type": "status",
+                                    "data": {"description": "Request completed successfully", "done": True},
+                                })
                             return resp_text
                         return ""
                 except asyncio.TimeoutError:
@@ -657,42 +639,31 @@ class Pipe:
                                     logging.info("Streaming: received [DONE]")
                                     if __event_emitter__:
                                         if usage_captured:
-                                            logging.info("Raw usage data received: %s", json.dumps(usage_captured))
-                                            if timings_captured:
-                                                logging.info("Raw timings data received: %s", json.dumps(timings_captured))
                                             stats = self.format_usage_status(usage_captured, timings_captured)
-                                            logging.info("Streaming: emitting status with usage: %s", stats)
-                                            await __event_emitter__(
-                                                {"type": "status", "data": {"description": stats, "done": True}}
-                                            )
+                                            await __event_emitter__({
+                                                "type": "status", 
+                                                "data": {"description": stats, "done": True}
+                                            })
                                         else:
-                                            await __event_emitter__(
-                                                {
-                                                    "type": "status",
-                                                    "data": {"description": "Request completed", "done": True},
-                                                }
-                                            )
+                                            await __event_emitter__({
+                                                "type": "status",
+                                                "data": {"description": "Request completed", "done": True},
+                                            })
                                     break
 
                                 data = json.loads(line_text)
-                                # If usage information is included in the stream, emit it to the frontend
+                                # If usage information is included in the stream, capture it
                                 if isinstance(data, dict) and data.get("usage"):
                                     usage_captured = data["usage"]
                                     # Also capture timings if present
                                     if "timings" in data:
                                         timings_captured = data["timings"]
-                                    if __event_emitter__:
-                                        logging.info("Streaming: usage frame received; emitting usage")
-                                        await __event_emitter__(
-                                            {"type": "usage", "data": usage_captured}
-                                        )
                                     # Do not yield anything for usage-only messages
                                     if not (
                                         "choices" in data
                                         and len(data["choices"]) > 0
                                         and "delta" in data["choices"][0]
                                     ):
-                                        logging.debug("Streaming: usage-only frame; no delta to yield")
                                         continue
                                 if (
                                     "choices" in data
