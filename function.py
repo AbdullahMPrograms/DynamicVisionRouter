@@ -195,16 +195,13 @@ class Pipe:
                 )
 
             return error_msg
-        finally:    #could be a potential optimization to avoid redundant code
+        finally:
             if __event_emitter__ and processing_message:
-                # Clear the processing message by sending a completion update
                 await __event_emitter__(
                     {
                         "type": "status",
                         "data": {
-                            # Empty description clears the text
-                            "description": "",
-                            # Done flag removes the status indicator
+                            "description": "Generating Response...",
                             "done": True,
                         },
                     }
