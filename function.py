@@ -49,14 +49,6 @@ class Pipe:
             ),
             description="The prompt to use when asking Gemini to describe an image",
         )
-        SHOW_GEMINI_DESCRIPTIONS: bool = Field(
-            default=os.getenv("SHOW_GEMINI_DESCRIPTIONS", "false").lower() == "true",
-            description="Show Gemini's raw image descriptions in a collapsible section",
-        )
-        GEMINI_SECTION_TITLE: str = Field(
-            default=os.getenv("GEMINI_SECTION_TITLE", "Image Descriptions"),
-            description="Title for the collapsible Gemini descriptions section",
-        )
 
     def __init__(self):
         logging.basicConfig(level=logging.INFO)
@@ -163,25 +155,12 @@ class Pipe:
             response = model.generate_content([prompt, image_part])
             description = response.text
 
-            # Store the description for display if enabled
-            if self.valves.SHOW_GEMINI_DESCRIPTIONS:
-                self.current_gemini_descriptions.append(
-                    {
-                        "description": description,
-                    }
-                )
-
+            logging.info("Gemini image description: %s", description)
             return description
 
         except Exception as e:
             error_msg = f"[Error processing image: {str(e)}]"
-            logging.error(f"Error processing image with Gemini: {str(e)}")
-
-            # Store error info if enabled
-            if self.valves.SHOW_GEMINI_DESCRIPTIONS:
-                self.current_gemini_descriptions.append(
-                    {"description": error_msg, "error": True}
-                )
+            logging.error(error_msg)
 
             return error_msg
 
@@ -205,7 +184,7 @@ class Pipe:
                     logging.debug("Found user message with %d images at index %d", len(images), i)
                     break
 
-        # Process all messages (ensure all messages are converted to text format)
+        # Process all images in message (ensure all messages are converted to text format)
         for i, message in enumerate(messages):
             images, text = self.extract_images_and_text(message)
 
@@ -234,18 +213,8 @@ class Pipe:
                     processed_messages.append(
                         {"role": message["role"], "content": combined_content.strip()}
                     )
-                else:
-                    logging.debug("Skipping image processing for older message (index %d, %d images)", i, len(images))
-                    # For older messages with images, convert to text format but don't process with Gemini
-                    # Just append placeholders for images
-                    image_placeholders = [f"[Image {i+1}]" for i in range(len(images))]
-                    combined_content = text + " " + " ".join(image_placeholders)
-                    processed_messages.append(
-                        {"role": message["role"], "content": combined_content.strip()}
-                    )
             else:
                 # Messages with no images can be passed through as-is
-                # If the content is a list, convert it to text for compatibility
                 if isinstance(message.get("content"), list):
                     # Extract only text parts
                     text_content = " ".join(
@@ -274,28 +243,6 @@ class Pipe:
             )
 
         return processed_messages
-
-    def format_gemini_descriptions(self):
-        """Format Gemini descriptions as a collapsible HTML section"""
-        if not self.current_gemini_descriptions:
-            return ""
-
-        # Opening details tag with configurable summary
-        result = f"<details>\n<summary>{self.valves.GEMINI_SECTION_TITLE}</summary>\n\n"
-
-        # Content inside the details tag
-        for idx, desc in enumerate(self.current_gemini_descriptions, 1):
-            error_prefix = "ERROR: " if desc.get("error") else ""
-
-            result += f"**Image {idx}**\n\n"
-            result += f"{error_prefix}{desc['description']}\n\n"
-
-        # Add separator inside the details tag before closing - using Markdown's horizontal rule
-        result += "---\n\n"
-
-        # Close the details tag
-        result += "</details>\n\n"
-        return result
 
     def format_usage_status(self, usage: Dict[str, Any], timings: Optional[Dict[str, Any]] = None) -> str:
         """Return single-line usage summary: "TG: 81.75 T/s | PP: 70.61 T/s | PT: 74 | GT: 150 tokens | TT: 224 tokens | 1.83 sec"""
@@ -396,17 +343,10 @@ class Pipe:
                 "Content-Type": "application/json",
             }
 
-            gemini_desc = ""
-            if (
-                self.valves.SHOW_GEMINI_DESCRIPTIONS
-                and self.current_gemini_descriptions
-            ):
-                gemini_desc = self.format_gemini_descriptions()
             async for chunk in self._stream_response(
                 url=self.valves.OPENAI_API_URL,
                 headers=headers,
                 payload=payload,
-                gemini_descriptions=gemini_desc,
                 __event_emitter__=__event_emitter__,
             ):
                 yield chunk
